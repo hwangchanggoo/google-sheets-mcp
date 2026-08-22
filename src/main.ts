@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import express, {type Request, type Response} from 'express';
+import express, {type NextFunction, type Request, type Response} from 'express';
 import {createServer} from './index.js';
 import type {
 	OAuthMetadata, OAuthProtectedResourceMetadata, OAuthClientInformationFull, OAuthClientMetadata,
@@ -64,6 +64,26 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 		}
 
 		const app = express();
+
+		// Remote and browser-based MCP clients preflight every request, and need to
+		// read Mcp-Session-Id and WWW-Authenticate off the response to drive the
+		// session and OAuth flows. Without this the connection fails before any
+		// JSON-RPC is exchanged.
+		app.use((req: Request, res: Response, next: NextFunction) => {
+			res.setHeader('Access-Control-Allow-Origin', req.headers.origin ?? '*');
+			res.setHeader('Vary', 'Origin');
+			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID');
+			res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id, WWW-Authenticate');
+			res.setHeader('Access-Control-Max-Age', '86400');
+			if (req.method === 'OPTIONS') {
+				res.sendStatus(204);
+				return;
+			}
+
+			next();
+		});
+
 		app.use(express.json({limit: '20mb'}));
 		app.use(express.urlencoded({extended: true}));
 
@@ -91,6 +111,10 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			resource_name: 'Google Sheets MCP Server',
 			resource_documentation: 'https://github.com/domdomegg/google-sheets-mcp',
 		};
+
+		// RFC 9728: a 401 must tell the client where to find the metadata above,
+		// otherwise it cannot discover that this is an MCP server needing OAuth.
+		const wwwAuthenticate = `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`;
 
 		// Metadata endpoints
 		app.get('/.well-known/oauth-authorization-server', (_req, res) => {
@@ -196,6 +220,21 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			}
 		});
 
+		// Clients probe GET (SSE stream) and DELETE (session teardown) on the MCP
+		// endpoint. This transport is stateless so neither applies, but falling
+		// through to Express's 404 reads as "wrong URL" rather than "wrong method".
+		const methodNotAllowed = (_req: Request, res: Response) => {
+			res.setHeader('Allow', 'POST, OPTIONS');
+			res.status(405).json({
+				jsonrpc: '2.0',
+				error: {code: -32000, message: 'Method Not Allowed: this server is stateless, use POST'},
+				id: null,
+			});
+		};
+
+		app.get('/mcp', methodNotAllowed);
+		app.delete('/mcp', methodNotAllowed);
+
 		// Stateless MCP endpoint
 		app.post('/mcp', async (req: Request, res: Response) => {
 			const token = extractBearerToken(req);
@@ -203,6 +242,7 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 			// Require auth, except for tools/list for discovery
 			const method = req.body?.method as string | undefined;
 			if (!token && method !== 'tools/list') {
+				res.setHeader('WWW-Authenticate', wwwAuthenticate);
 				res.status(401).json({
 					jsonrpc: '2.0',
 					error: {code: -32001, message: 'Unauthorized: Bearer token required'},
@@ -213,6 +253,7 @@ const transport = process.env.MCP_TRANSPORT || 'stdio';
 
 			// Validate token before processing
 			if (token && !await isTokenValid(token)) {
+				res.setHeader('WWW-Authenticate', wwwAuthenticate);
 				res.status(401).json({
 					jsonrpc: '2.0',
 					error: {code: -32001, message: 'Unauthorized: Invalid or expired token'},
