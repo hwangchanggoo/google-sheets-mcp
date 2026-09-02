@@ -1,0 +1,54 @@
+name: Keep Render service awake
+
+# Render 무료 플랜은 15분 무접속이면 spin-down되고, 다음 요청이 50초 이상 걸려
+# MCP 커넥터가 타임아웃으로 실패한다. 업무시간 동안만 10분 간격으로 깨워 둔다.
+#
+# cron은 UTC 기준. KST = UTC+9.
+#   UTC 22:00-23:59 -> KST 07:00-08:59
+#   UTC 00:00-04:59 -> KST 09:00-13:59
+#   UTC 05:00       -> KST 14:00
+on:
+  schedule:
+    - cron: '*/10 22-23,0-4 * * *'
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping MCP endpoint and verify patches
+        run: |
+          URL="https://google-sheets-mcp-1.onrender.com/mcp"
+
+          # 콜드 스타트면 첫 응답까지 50초 이상 걸리므로 넉넉히 기다린다.
+          headers=$(curl -is -X POST "$URL" \
+            -H 'Content-Type: application/json' \
+            -d '{}' \
+            --max-time 150)
+
+          status=$(printf '%s' "$headers" | head -n1)
+          echo "status: $status"
+
+          # 401 = 서버 정상 (인증 없이 호출했으니 당연한 응답)
+          if ! printf '%s' "$status" | grep -q '401'; then
+            echo "::error::기대한 401이 아님 — 서비스 상태 확인 필요"
+            printf '%s' "$headers" | head -n 30
+            exit 1
+          fi
+
+          # 패치 (a) 생존 확인: 이 헤더가 없으면 클라이언트가 OAuth를 시작하지 못한다.
+          if printf '%s' "$headers" | grep -qi 'www-authenticate: Bearer resource_metadata'; then
+            echo "OK: WWW-Authenticate 헤더 정상"
+          else
+            echo "::error::WWW-Authenticate 헤더 없음 — fork 패치가 유실됐을 수 있음 (upstream 재pull 여부 확인)"
+            exit 1
+          fi
+
+          # 패치 (c) 생존 확인: GET /mcp 는 404가 아니라 405여야 한다.
+          get_code=$(curl -s -o /dev/null -w '%{http_code}' -X GET "$URL" --max-time 60)
+          echo "GET /mcp -> $get_code"
+          if [ "$get_code" != "405" ]; then
+            echo "::warning::GET /mcp 가 405가 아님 (받은 값: $get_code) — 패치 유실 가능성"
+          fi
