@@ -3,14 +3,15 @@ name: Keep Render service awake
 # Render 무료 플랜은 15분 무접속이면 spin-down되고, 다음 요청이 50초 이상 걸려
 # MCP 커넥터가 타임아웃으로 실패한다. 업무시간 동안만 10분 간격으로 깨워 둔다.
 #
+# 창은 매일 KST 07:00-19:00. 월 사용량 약 360시간으로 무료 한도(750h) 내.
 # cron은 UTC 기준. KST = UTC+9.
 #   UTC 22:00-23:59 -> KST 07:00-08:59
-#   UTC 00:00-04:59 -> KST 09:00-13:59
-#   UTC 05:00       -> KST 14:00
+#   UTC 00:00-09:59 -> KST 09:00-18:59
+#   UTC 10:00       -> KST 19:00
 on:
   schedule:
-    - cron: '*/10 22-23,0-4 * * *'
-    - cron: '0 5 * * *'
+    - cron: '*/10 22-23,0-9 * * *'
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
